@@ -1,0 +1,21 @@
+# Backend Environment Secrets
+.env
+.env.*
+!.env.example
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# OS & IDE
+.DS_Store
+.vscode/
+.idea/
