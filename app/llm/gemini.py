@@ -246,8 +246,10 @@ def sanitize_and_normalize_lesson(lesson: Dict[str, Any], topic: str, difficulty
 
 class GeminiProvider(BaseLLMProvider):
     def __init__(self):
-        self.api_key = os.getenv("GEMINI_API_KEY", "")
-        self.model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+        self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        # Clean model name to prevent double "models/models/..." or quotes
+        raw_model = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
+        self.model = raw_model.replace("models/", "").strip('"').strip("'")
 
     async def generate_lesson(self, topic: str, difficulty: str = "Foundational", duration_minutes: int = 5) -> Dict[str, Any]:
         if not self.api_key:
@@ -266,7 +268,9 @@ class GeminiProvider(BaseLLMProvider):
             selected_cards = random.sample(INTERACTIVE_CARD_POOL, card_count)
             prompt = build_dynamic_prompt(topic, difficulty, duration_minutes, selected_cards)
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+            # Ensure model URL is formatted cleanly
+            clean_model = self.model.replace("models/", "").strip('"').strip("'")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={self.api_key}"
             payload = {
                 "contents": [
                     {
@@ -281,7 +285,7 @@ class GeminiProvider(BaseLLMProvider):
                 }
             }
 
-            print(f"[DEBUG Gemini] Requesting {len(selected_cards)+2}-card deck ({difficulty} difficulty) for '{topic}'...")
+            print(f"[DEBUG Gemini] Requesting {len(selected_cards)+2}-card deck ({difficulty} difficulty) for '{topic}' using model '{clean_model}'...")
             resp = requests.post(url, json=payload, timeout=60)
 
             if resp.status_code == 200:
