@@ -259,11 +259,11 @@ class GeminiProvider(BaseLLMProvider):
 
         try:
             if duration_minutes <= 3:
-                card_count = 2
+                card_count = 2  # 4 cards total (Hook + 2 interactive + Takeaway)
             elif duration_minutes <= 5:
-                card_count = 4
+                card_count = 4  # 6 cards total (Hook + 4 interactive + Takeaway)
             else:
-                card_count = 5
+                card_count = 7  # 9 cards total (Hook + 7 interactive + Takeaway) for 10 min
 
             selected_cards = random.sample(INTERACTIVE_CARD_POOL, card_count)
             prompt = build_dynamic_prompt(topic, difficulty, duration_minutes, selected_cards)
