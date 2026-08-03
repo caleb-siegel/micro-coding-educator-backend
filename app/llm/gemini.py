@@ -4,6 +4,7 @@ import random
 import logging
 from typing import Dict, Any, List
 import requests
+from fastapi import HTTPException
 from .base import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
@@ -18,18 +19,30 @@ INTERACTIVE_CARD_POOL = [
     "guess_the_metric",
     "timeline",
     "drag_to_order",
-    "match_pairs"
+    "match_pairs",
+    "debug_session"
 ]
 
-def build_dynamic_prompt(topic: str, difficulty: str, duration_minutes: int, selected_cards: List[str]) -> str:
-    card_sequence_instructions = [
-        f"Card 1: type 'hook' (headline, body, statBadge: {{label, value}}, simpleExplanation)"
-    ]
-    for idx, c_type in enumerate(selected_cards):
-        card_sequence_instructions.append(f"Card {idx+2}: type '{c_type}'")
-    card_sequence_instructions.append(f"Card {len(selected_cards)+2}: type 'takeaway' (oneSentenceSummary, keyInsights [2-3 items])")
+def build_cards_prompt(topic: str, difficulty: str, count: int, seen_titles: List[str] = None, include_hook: bool = False) -> str:
+    selected_types = random.sample(INTERACTIVE_CARD_POOL, min(count, len(INTERACTIVE_CARD_POOL)))
+    card_sequence_instructions = []
+    start_idx = 1
+    if include_hook:
+        card_sequence_instructions.append("Card 1: type 'hook' (headline, body, statBadge: {label, value}, simpleExplanation)")
+        start_idx = 2
+        interactive_types = selected_types[:count-1]
+    else:
+        interactive_types = selected_types[:count]
+
+    for idx, c_type in enumerate(interactive_types):
+        card_sequence_instructions.append(f"Card {start_idx + idx}: type '{c_type}'")
 
     seq_str = "\n".join(card_sequence_instructions)
+
+    seen_guidance = ""
+    if seen_titles and len(seen_titles) > 0:
+        seen_str = "\n".join([f"- {t}" for t in seen_titles[-10:]])
+        seen_guidance = f"\nALREADY COVERED TOPICS/QUESTIONS (DO NOT REPEAT OR DUPLICATE THESE CONCEPTS):\n{seen_str}\n"
 
     difficulty_guidance = ""
     if "foundational" in difficulty.lower() or "intro" in difficulty.lower():
@@ -57,17 +70,20 @@ DIFFICULTY LEVEL GUIDANCE — 'Intermediate' (🟡 Mid-Level Developer):
 """
 
     return f"""You are an expert Senior Software Engineer and Product Educator.
-Generate a concise, punchy {len(selected_cards)+2}-card micro-learning deck for software engineers on:
+Generate a concise batch of {count} interactive learning cards for software engineers on:
 TOPIC: {topic}
 DIFFICULTY: {difficulty}
-TARGET DURATION: {duration_minutes} Minutes
 
 {difficulty_guidance}
+{seen_guidance}
 
-Target Card Sequence ({len(selected_cards)+2} Cards total):
+Target Card Sequence ({count} Cards total):
 {seq_str}
 
 Schema rules for specific card types:
+- type 'hook':
+  headline: string, body: string, statBadge: {{ label: string, value: string }}, simpleExplanation: string
+
 - type 'multiple_choice':
   question: string
   options: [ {{ id: "opt-1", text: "...", isCorrect: true, explanation: "..." }}, {{ id: "opt-2", text: "...", isCorrect: false, explanation: "..." }} ]
@@ -125,20 +141,23 @@ Schema rules for specific card types:
   items: [ {{ id: "d1", label: "...", correctIndex: 0 }} ]
   explanation: string
 
-Return ONLY a valid JSON object:
-{{
-  "id": "lesson-id",
-  "title": "Lesson Title",
-  "topic": "{topic}",
-  "difficulty": "{difficulty}",
-  "durationMinutes": {duration_minutes},
-  "subtitle": "Subtitle",
-  "cards": [ ...array of {len(selected_cards)+2} cards... ]
-}}
-No markdown formatting or extra text.
+- type 'debug_session':
+  bugTitle: string
+  symptom: string
+  stackTraceOrLog: string
+  codeSnippet: {{ filename: "auth.ts", language: "typescript", lines: [ {{ lineNumber: 1, code: "...", isBuggyLine: false }}, {{ lineNumber: 2, code: "...", isBuggyLine: true }} ] }}
+  fixOptions: [ {{ id: "f1", patchCode: "...", isCorrectFix: true, explanation: "..." }}, {{ id: "f2", patchCode: "...", isCorrectFix: false, explanation: "..." }} ]
+  explanation: string
+
+Return ONLY a JSON array containing the {count} card objects:
+[
+  {{ "type": "...", ... }},
+  ...
+]
+No markdown formatting or extra text outside the JSON array.
 """
 
-def sanitize_and_normalize_lesson(lesson: Dict[str, Any], topic: str, difficulty: str, duration_minutes: int) -> Dict[str, Any]:
+def sanitize_and_normalize_lesson(lesson: Dict[str, Any], topic: str, difficulty: str, duration_minutes: int = 5) -> Dict[str, Any]:
     if not isinstance(lesson, dict):
         lesson = {}
 
@@ -159,7 +178,7 @@ def sanitize_and_normalize_lesson(lesson: Dict[str, Any], topic: str, difficulty
             continue
 
         c_type = card.get("type", "multiple_choice")
-        card["id"] = card.get("id") or f"card-{idx+1}"
+        card["id"] = card.get("id") or f"card-{random.randint(10000, 99999)}-{idx+1}"
 
         if c_type == "multiple_choice":
             raw_options = card.get("options") or card.get("choices")
@@ -227,8 +246,8 @@ def sanitize_and_normalize_lesson(lesson: Dict[str, Any], topic: str, difficulty
                 card["availableBlocks"] = [
                     {"id": "b1", "label": f"{topic} Ingress", "icon": "Layers"},
                     {"id": "b2", "label": "RAM Cache (Redis)", "icon": "Database"},
-                    {"id": "b3", "label": "Event Stream (Kafka)", "icon": "Cpu"},
-                    {"id": "b4", "label": "Persistent DB", "icon": "HardDrive"}
+                    {"id": "b3", "label": "Async Queue (Kafka)", "icon": "Cpu"},
+                    {"id": "b4", "label": "Persistent SQL DB", "icon": "HardDrive"}
                 ]
             if not isinstance(slots, list) or len(slots) == 0:
                 card["targetSlots"] = [
@@ -244,31 +263,41 @@ def sanitize_and_normalize_lesson(lesson: Dict[str, Any], topic: str, difficulty
     return lesson
 
 
+import re
+
+def format_sharp_summary(text: str, max_sentences: int = 3) -> str:
+    text = text.strip()
+    if not text:
+        return ""
+
+    lines = [l for l in text.split("\n") if not l.strip().lower().startswith(("rule", "constraint", "* constraint", "**rule", "format rule", "system instruction", "instruction:"))]
+    cleaned_text = " ".join(lines).strip()
+
+    # Extract complete sentences ending in . ! or ?
+    sentence_pattern = re.compile(r'([^.!?]+[.!?])', re.DOTALL)
+    matches = sentence_pattern.findall(cleaned_text)
+
+    if matches:
+        selected = matches[:max_sentences]
+        return " ".join([s.strip() for s in selected])
+    return cleaned_text
+
+
 class GeminiProvider(BaseLLMProvider):
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
-        # Clean model name to prevent double "models/models/..." or quotes
         raw_model = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
         self.model = raw_model.replace("models/", "").strip('"').strip("'")
 
-    async def generate_lesson(self, topic: str, difficulty: str = "Foundational", duration_minutes: int = 5) -> Dict[str, Any]:
+    async def generate_cards(self, topic: str, difficulty: str = "Foundational", count: int = 2, seen_titles: List[str] = None, include_hook: bool = False) -> List[Dict[str, Any]]:
         if not self.api_key:
-            logger.warning("GEMINI_API_KEY not found. Using fallback structured lesson generator.")
-            print("[DEBUG Gemini] No API Key provided in .env. Using Fallback Engine.")
-            return self._fallback_lesson(topic, difficulty, duration_minutes)
+            raise HTTPException(
+                status_code=503,
+                detail="GEMINI_API_KEY is not configured in backend/.env."
+            )
 
         try:
-            if duration_minutes <= 3:
-                card_count = 2  # 4 cards total (Hook + 2 interactive + Takeaway)
-            elif duration_minutes <= 5:
-                card_count = 4  # 6 cards total (Hook + 4 interactive + Takeaway)
-            else:
-                card_count = 7  # 9 cards total (Hook + 7 interactive + Takeaway) for 10 min
-
-            selected_cards = random.sample(INTERACTIVE_CARD_POOL, card_count)
-            prompt = build_dynamic_prompt(topic, difficulty, duration_minutes, selected_cards)
-
-            # Ensure model URL is formatted cleanly
+            prompt = build_cards_prompt(topic, difficulty, count, seen_titles, include_hook)
             clean_model = self.model.replace("models/", "").strip('"').strip("'")
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={self.api_key}"
             payload = {
@@ -281,98 +310,104 @@ class GeminiProvider(BaseLLMProvider):
                 ],
                 "generationConfig": {
                     "response_mime_type": "application/json",
-                    "temperature": 0.5
+                    "temperature": 0.6
                 }
             }
 
-            print(f"[DEBUG Gemini] Requesting {len(selected_cards)+2}-card deck ({difficulty} difficulty) for '{topic}' using model '{clean_model}'...")
-            resp = requests.post(url, json=payload, timeout=60)
+            print(f"[DEBUG Gemini] Requesting {count} cards for '{topic}' ({difficulty}) with model '{clean_model}'...")
+            resp = requests.post(url, json=payload, timeout=25)
 
             if resp.status_code == 200:
                 data = resp.json()
                 text = data["candidates"][0]["content"]["parts"][0]["text"]
-                raw_json = json.loads(text)
-                normalized_lesson = sanitize_and_normalize_lesson(raw_json, topic, difficulty, duration_minutes)
-                print(f"[DEBUG Gemini] Successfully generated {len(normalized_lesson.get('cards', []))}-card deck for '{topic}'.")
-                return normalized_lesson
+                raw_cards = json.loads(text)
+                if isinstance(raw_cards, dict) and "cards" in raw_cards:
+                    raw_cards = raw_cards["cards"]
+                if not isinstance(raw_cards, list):
+                    raw_cards = []
+
+                dummy_lesson = {"cards": raw_cards}
+                normalized = sanitize_and_normalize_lesson(dummy_lesson, topic, difficulty)
+                cards = normalized.get("cards", [])
+                print(f"[DEBUG Gemini] Successfully generated {len(cards)} cards for '{topic}'.")
+                return cards
             else:
-                print(f"[DEBUG Gemini ERROR] Status Code {resp.status_code}: {resp.text}")
                 logger.error(f"Gemini API returned status {resp.status_code}: {resp.text}")
-                return self._fallback_lesson(topic, difficulty, duration_minutes)
-
+                raise HTTPException(
+                    status_code=resp.status_code if 400 <= resp.status_code < 600 else 500,
+                    detail=f"Gemini API error ({resp.status_code}): {resp.text}"
+                )
+        except HTTPException:
+            raise
         except Exception as e:
-            print(f"[DEBUG Gemini EXCEPTION] {type(e).__name__}: {e}")
-            logger.error(f"GeminiProvider exception: {e}")
-            return self._fallback_lesson(topic, difficulty, duration_minutes)
+            logger.error(f"Gemini generate_cards exception: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to generate cards via Gemini API: {str(e)}"
+            )
 
-    def _fallback_lesson(self, topic: str, difficulty: str, duration_minutes: int = 5) -> Dict[str, Any]:
-        t = topic.strip().capitalize()
+    async def generate_lesson(self, topic: str, difficulty: str = "Foundational", duration_minutes: int = 5) -> Dict[str, Any]:
+        cards = await self.generate_cards(topic=topic, difficulty=difficulty, count=3, include_hook=True)
         return {
-            "id": f"gemini-fallback-{t.lower()}",
-            "title": f"Mastering {t}",
-            "topic": t,
+            "id": f"gemini-session-{random.randint(1000, 9999)}",
+            "title": f"Mastering {topic}",
+            "topic": topic,
             "difficulty": difficulty,
-            "durationMinutes": duration_minutes,
-            "subtitle": f"Bite-sized architecture challenge for {t}",
-            "cards": [
-                {
-                    "id": "g-1",
-                    "type": "hook",
-                    "headline": f"Why {t} is crucial in modern high-throughput software systems.",
-                    "body": f"Understanding {t} enables engineers to design reliable, scalable applications that gracefully handle traffic surges.",
-                    "statBadge": {"label": "Impact", "value": "100x Scale"},
-                    "iconName": "Sparkles",
-                    "simpleExplanation": f"{t} simplifies complex software by isolating component dependencies and reducing system latency."
-                },
-                {
-                    "id": "g-2",
-                    "type": "multiple_choice",
-                    "question": f"What primary problem does {t} solve in software design?",
-                    "hint": f"Consider how {t} impacts performance and maintainability.",
-                    "simpleExplanation": f"{t} prevents single-point-of-failure bottlenecks by distributing workloads cleanly.",
-                    "options": [
-                        {
-                            "id": "opt-1",
-                            "text": f"Decouples service dependencies and optimizes throughput for {t}",
-                            "isCorrect": True,
-                            "explanation": f"Correct! {t} enables clean separation of concerns and scales under heavy load."
-                        },
-                        {
-                            "id": "opt-2",
-                            "text": "Permanently eliminates the need for RAM and CPU hardware",
-                            "isCorrect": False,
-                            "explanation": "All software execution requires hardware resources."
-                        }
-                    ]
-                },
-                {
-                    "id": "g-3",
-                    "type": "build_the_system",
-                    "task": f"Assemble a Resilient {t} Pipeline",
-                    "subtitle": "Tap components to place them in correct pipeline order:",
-                    "availableBlocks": [
-                        {"id": "b1", "label": f"{t} API Gateway", "icon": "Layers"},
-                        {"id": "b2", "label": "In-Memory Cache (Redis)", "icon": "Database"},
-                        {"id": "b3", "label": "Async Queue (Kafka)", "icon": "Cpu"},
-                        {"id": "b4", "label": "Persistent SQL DB", "icon": "HardDrive"}
-                    ],
-                    "targetSlots": [
-                        {"slotId": "s1", "label": "1. API Gateway", "correctBlockId": "b1"},
-                        {"slotId": "s2", "label": "2. In-Memory Cache", "correctBlockId": "b2"},
-                        {"slotId": "s3", "label": "3. Event Queue", "correctBlockId": "b3"},
-                        {"slotId": "s4", "label": "4. Database", "correctBlockId": "b4"}
-                    ],
-                    "explanation": f"Spot on! Incoming traffic hits the {t} Gateway, checks Redis cache, queues events in Kafka, and persists data."
-                },
-                {
-                    "id": "g-4",
-                    "type": "takeaway",
-                    "oneSentenceSummary": f"Mastering {t} gives software engineers a critical tool for building resilient, high-scale applications.",
-                    "keyInsights": [
-                        f"Decouple components using {t} design principles.",
-                        "Always benchmark latency and storage trade-offs before deploying to production."
-                    ],
-                    "suggestedNextTopic": "System Design"
-                }
-            ]
+            "subtitle": f"Interactive practice for {topic}",
+            "cards": cards
         }
+
+    async def ask_card_question(self, lesson_topic: str, difficulty: str, card_context: Dict[str, Any], messages: List[Dict[str, str]], user_prompt: str) -> str:
+        if not self.api_key:
+            raise HTTPException(
+                status_code=503,
+                detail="GEMINI_API_KEY is not configured in backend/.env."
+            )
+
+        system_instruction = f"""You are an expert Senior Software Engineer tutoring a developer on an interactive coding card.
+LESSON TOPIC: {lesson_topic} ({difficulty} Level)
+CARD CONTEXT: {json.dumps(card_context)}
+
+INSTRUCTION: Answer the student's question directly in a crisp, high-level summary of 2 to 3 sentences. Keep your response clear and easy to digest. If you feel the concept requires deeper technical detail, end your response with: "Feel free to ask if you'd like more details!"
+"""
+
+        contents = []
+        for msg in (messages or []):
+            role = "user" if msg.get("role") == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
+
+        contents.append({"role": "user", "parts": [{"text": user_prompt}]})
+
+        clean_model = self.model.replace("models/", "").strip('"').strip("'")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={self.api_key}"
+        payload = {
+            "system_instruction": {
+                "parts": [{"text": system_instruction}]
+            },
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.5,
+                "maxOutputTokens": 800
+            }
+        }
+
+        try:
+            resp = requests.post(url, json=payload, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                return format_sharp_summary(raw_text, max_sentences=3)
+            else:
+                logger.error(f"Gemini Chat API returned status {resp.status_code}: {resp.text}")
+                raise HTTPException(
+                    status_code=resp.status_code if 400 <= resp.status_code < 600 else 500,
+                    detail=f"Gemini API error ({resp.status_code}): {resp.text}"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Gemini ask_card_question exception: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to communicate with Gemini API: {str(e)}"
+            )

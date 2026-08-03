@@ -14,6 +14,7 @@ CardType = Literal[
     'before_vs_after',
     'guess_the_metric',
     'timeline',
+    'debug_session',
     'takeaway'
 ]
 
@@ -186,6 +187,31 @@ class TimelineCardModel(BaseCardModel):
     events: List[EventModel]
     explanation: str
 
+class DebugLineModel(BaseModel):
+    lineNumber: int
+    code: str
+    isBuggyLine: bool
+
+class DebugSnippetModel(BaseModel):
+    filename: Optional[str] = 'source.ts'
+    language: Optional[str] = 'typescript'
+    lines: List[DebugLineModel]
+
+class DebugFixOptionModel(BaseModel):
+    id: str
+    patchCode: str
+    isCorrectFix: bool
+    explanation: str
+
+class DebugSessionCardModel(BaseCardModel):
+    type: Literal['debug_session'] = 'debug_session'
+    bugTitle: str
+    symptom: str
+    stackTraceOrLog: Optional[str] = None
+    codeSnippet: DebugSnippetModel
+    fixOptions: Optional[List[DebugFixOptionModel]] = None
+    explanation: str
+
 class TakeawayCardModel(BaseCardModel):
     type: Literal['takeaway'] = 'takeaway'
     oneSentenceSummary: str
@@ -204,6 +230,7 @@ LessonCardUnion = Union[
     BeforeVsAfterCardModel,
     GuessTheMetricCardModel,
     TimelineCardModel,
+    DebugSessionCardModel,
     TakeawayCardModel
 ]
 
@@ -212,11 +239,38 @@ class LessonResponseModel(BaseModel):
     title: str
     topic: str
     difficulty: str
-    durationMinutes: int
+    durationMinutes: Optional[int] = None
     subtitle: str
     cards: List[dict]
 
 class GenerateLessonRequest(BaseModel):
     topic: str
     difficulty: Optional[str] = 'Foundational'
-    durationMinutes: Optional[int] = 5
+    durationMinutes: Optional[int] = None
+
+class StartSessionRequest(BaseModel):
+    topic: str
+    difficulty: Optional[str] = 'Foundational'
+    count: Optional[int] = 3
+
+class GenerateCardsRequest(BaseModel):
+    topic: str
+    difficulty: Optional[str] = 'Foundational'
+    count: Optional[int] = 2
+    seenTitles: Optional[List[str]] = None
+
+
+class ChatMessageModel(BaseModel):
+    role: Literal['user', 'assistant']
+    content: str
+
+class CardChatRequest(BaseModel):
+    lessonTopic: str
+    difficulty: Optional[str] = 'Foundational'
+    cardContext: dict
+    messages: Optional[List[ChatMessageModel]] = []
+    userPrompt: str
+
+class CardChatResponse(BaseModel):
+    reply: str
+
